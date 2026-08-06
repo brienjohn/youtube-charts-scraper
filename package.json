@@ -1,0 +1,13 @@
+{
+  "name": "youtube-charts-scraper",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "current": "node youtube_charts_scrape.js --mode current",
+    "backfill": "node youtube_charts_scrape.js --mode backfill --max-targets 10"
+  },
+  "dependencies": {
+    "playwright": "^1.47.0"
+  }
+}

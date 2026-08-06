@@ -1,0 +1,38 @@
+name: Scrape YouTube Charts
+
+on:
+  schedule:
+    - cron: "0 4 * * *"   # 每天 UTC 04:00 = 台北 12:00
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "current 或 backfill"
+        required: false
+        default: "current"
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: npm install
+      - run: npx playwright install --with-deps chromium
+      - name: Determine mode
+        id: mode
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "mode=${{ github.event.inputs.mode }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=current" >> "$GITHUB_OUTPUT"
+          fi
+      - run: node youtube_charts_scrape.js --mode ${{ steps.mode.outputs.mode }}
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/
+          git diff --staged --quiet || git commit -m "YouTube charts snapshot $(date -u +%Y-%m-%d)"
+          git push
