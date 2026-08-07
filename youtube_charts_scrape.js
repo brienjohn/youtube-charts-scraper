@@ -132,17 +132,22 @@ async function scrapeChart(page, url, ctx) {
 }
 
 function classifyRowText(rawText) {
-  // 用逗號分隔的數字、日期格式當標記，把一整列文字拆回標題／藝人／日期／數值
-  const dateMatch = rawText.match(DATE_PATTERN);
+  // 開頭常常夾帶名次數字／「New」標籤（跟縮圖同一列左側的排名徽章），
+  // 這些跟我們另外用陣列順序算好的 rank 欄位是重複資訊，先剝掉再判斷標題
+  let text = rawText.replace(/^\s*\d{1,3}\s*(New\s*)?/i, "").trim();
+
+  const dateMatch = text.match(DATE_PATTERN);
   const releaseDate = dateMatch ? dateMatch[0] : "";
 
-  let withoutDate = releaseDate ? rawText.replace(releaseDate, " | ") : rawText;
+  let withoutDate = releaseDate ? text.replace(releaseDate, " | ") : text;
 
   const numberMatches = withoutDate.match(/\d[\d,]{2,}/g) || [];
   const metricValue = numberMatches.length ? numberMatches[numberMatches.length - 1].replace(/,/g, "") : "";
 
   let remainder = withoutDate;
   for (const n of numberMatches) remainder = remainder.replace(n, " | ");
+  // 去掉名次升降的符號殘留（例如 "- 1"、"▲ 3" 這類名次變化標記）
+  remainder = remainder.replace(/[-▲▼]\s*\d*/g, " | ");
 
   const parts = remainder
     .split("|")
