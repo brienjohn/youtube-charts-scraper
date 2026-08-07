@@ -69,101 +69,56 @@ function writeCsvWithBom(filePath, rows) {
 async function debugCapture(page, label) {
   fs.mkdirSync("debug", { recursive: true });
   await page.screenshot({ path: `debug/${label}.png`, fullPage: true }).catch(() => null);
-  const snap = await page.accessibility.snapshot({ interestingOnly: false }).catch(() => null);
-  fs.writeFileSync(`debug/${label}.json`, JSON.stringify(snap, null, 2), "utf8");
-}
-
-// 把無障礙輔助樹攤平成一串文字節點，方便照順序掃描
-function flattenTextNodes(node, out = []) {
-  if (!node) return out;
-  if (node.name && typeof node.name === "string" && node.name.trim()) {
-    out.push({ role: node.role, name: node.name.trim() });
-  }
-  if (node.children) {
-    for (const child of node.children) flattenTextNodes(child, out);
-  }
-  return out;
-}
-
-// 找出所有「縮圖」節點的位置，當作每一列榜單的分界點，
-// 兩個縮圖之間出現的文字節點，就是同一列的內容
-function segmentRows(flatNodes) {
-  const thumbIndices = [];
-  flatNodes.forEach((n, i) => {
-    if (n.role === "image" && /thumbnail|封面|縮圖/.test(n.name)) thumbIndices.push(i);
-  });
-  if (!thumbIndices.length) return [];
-
-  const segments = [];
-  for (let i = 0; i < thumbIndices.length; i++) {
-    const start = thumbIndices[i] + 1;
-    const end = i + 1 < thumbIndices.length ? thumbIndices[i + 1] : flatNodes.length;
-    segments.push(flatNodes.slice(start, end));
-  }
-  return segments;
-}
-
-function classifySegment(segment) {
-  const texts = segment.map((n) => n.name).filter(Boolean);
-  let releaseDate = null;
-  let metricValue = null;
-  const remaining = [];
-
-  for (const t of texts) {
-    if (!releaseDate && DATE_PATTERN.test(t)) {
-      releaseDate = t;
-      continue;
-    }
-    if (!metricValue && PURE_NUMBER_PATTERN.test(t.replace(/\s/g, ""))) {
-      metricValue = t.replace(/,/g, "");
-      continue;
-    }
-    remaining.push(t);
-  }
-
-  // remaining 第一段通常是標題／藝人名，第二段（若有）通常是合作藝人／副標
-  const primaryName = remaining[0] || "";
-  const secondaryName = remaining.slice(1).join(" ") || "";
-
-  return {
-    primary_name: primaryName,
-    secondary_name: secondaryName,
-    release_date: releaseDate || "",
-    metric_value: metricValue || "",
-    raw_text: texts.join(" | ").slice(0, 300),
-  };
 }
 
 async function scrapeChart(page, url, ctx) {
-  await page.goto(url, { waitUntil: "networkidle", timeout: 45000 });
+  await page.goto(url, { waitUntil: "domcontentloaded", timeout: 45000 });
 
-  // 榜單資料是背景載入的，等到看得見縮圖為止，比等待某段文字更保險
-  const ready = await page
-    .waitForFunction(
-      () => document.querySelectorAll("img").length > 5,
-      { timeout: 20000 }
-    )
+  // 縮圖元素本身可以用 Playwright 的選取器直接找到（會自動穿透 Shadow DOM），
+  // 這比呼叫已經不建議使用的 page.accessibility.snapshot() 更可靠
+  const thumbLocator = page.locator('[aria-label*="thumbnail" i], img[alt*="thumbnail" i]');
+
+  const found = await thumbLocator
+    .first()
+    .waitFor({ state: "attached", timeout: 20000 })
     .then(() => true)
     .catch(() => false);
 
-  if (!ready) {
+  if (!found) {
     await debugCapture(page, `${ctx.cc}_${ctx.chartKey}${ctx.dateSuffix ? "_" + ctx.dateSuffix : ""}`);
     return [];
   }
 
   await page.waitForTimeout(1000);
 
-  const snapshot = await page.accessibility.snapshot({ interestingOnly: false });
-  const flat = flattenTextNodes(snapshot);
-  const segments = segmentRows(flat);
+  const thumbs = await thumbLocator.all();
+  const rawRowTexts = [];
+  for (const thumb of thumbs) {
+    try {
+      const text = await thumb.evaluate((el) => {
+        let node = el;
+        // 從縮圖往上找幾層祖先，直到抓到的文字看起來像一整列（含日期或數字），
+        // 或是已經到頂為止
+        for (let i = 0; i < 8 && node && node.parentElement; i++) {
+          node = node.parentElement;
+          const t = node.textContent.replace(/\s+/g, " ").trim();
+          if (t.length > 15) return t;
+        }
+        return node ? node.textContent.replace(/\s+/g, " ").trim() : "";
+      });
+      if (text) rawRowTexts.push(text);
+    } catch (e) {
+      // 忽略單一列讀取失敗，不影響其他列
+    }
+  }
 
-  if (!segments.length) {
+  if (!rawRowTexts.length) {
     await debugCapture(page, `${ctx.cc}_${ctx.chartKey}${ctx.dateSuffix ? "_" + ctx.dateSuffix : ""}`);
     return [];
   }
 
-  return segments.map((seg, i) => {
-    const parsed = classifySegment(seg);
+  return rawRowTexts.map((rawText, i) => {
+    const parsed = classifyRowText(rawText);
     return {
       captured_date: ctx.today,
       market: ctx.cc,
@@ -174,6 +129,33 @@ async function scrapeChart(page, url, ctx) {
       ...parsed,
     };
   });
+}
+
+function classifyRowText(rawText) {
+  // 用逗號分隔的數字、日期格式當標記，把一整列文字拆回標題／藝人／日期／數值
+  const dateMatch = rawText.match(DATE_PATTERN);
+  const releaseDate = dateMatch ? dateMatch[0] : "";
+
+  let withoutDate = releaseDate ? rawText.replace(releaseDate, " | ") : rawText;
+
+  const numberMatches = withoutDate.match(/\d[\d,]{2,}/g) || [];
+  const metricValue = numberMatches.length ? numberMatches[numberMatches.length - 1].replace(/,/g, "") : "";
+
+  let remainder = withoutDate;
+  for (const n of numberMatches) remainder = remainder.replace(n, " | ");
+
+  const parts = remainder
+    .split("|")
+    .map((s) => s.trim())
+    .filter((s) => s && !/^[\d\s.\-●]+$/.test(s));
+
+  return {
+    primary_name: parts[0] || "",
+    secondary_name: parts.slice(1).join(" ") || "",
+    release_date: releaseDate,
+    metric_value: metricValue,
+    raw_text: rawText.slice(0, 300),
+  };
 }
 
 async function findLatestAnchorDate(page, pathName, cc) {
