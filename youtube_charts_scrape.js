@@ -26,6 +26,8 @@ const CURRENT_CHARTS = [
   { key: "top_videos_weekly", pathName: "TopVideos", timeframe: "weekly" },
   { key: "top_songs_weekly", pathName: "TopSongs", timeframe: "weekly" },
   { key: "top_artists_weekly", pathName: "TopArtists", timeframe: "weekly" },
+  { key: "top_shorts_songs_daily", pathName: "TopShortsSongs", timeframe: "daily" },
+  { key: "top_shorts_songs_weekly", pathName: "TopShortsSongs", timeframe: "weekly" },
 ];
 
 // 可以回溯歷史的榜（週榜，網址帶 YYYYMMDD 往回跳 7 天）
@@ -191,6 +193,8 @@ async function runCurrent(page, outDir, limitMarkets) {
   for (const spec of CURRENT_CHARTS) {
     const allRows = [];
     for (const [cc, marketName] of marketEntries) {
+      // 「發燒影片」沒有 Global 這個範圍，只有各國自己的版本，跳過避免無謂的失敗紀錄
+      if (spec.key === "trending_videos" && cc === "global") continue;
       const url = buildUrl(spec.pathName, cc, spec.timeframe, null);
       console.log(`=== ${spec.key} / ${cc} : ${url} ===`, );
       try {
