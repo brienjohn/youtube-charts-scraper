@@ -94,33 +94,40 @@ async function scrapeChart(page, url, ctx) {
   await page.waitForTimeout(1000);
 
   const thumbs = await thumbLocator.all();
-  const rawRowTexts = [];
+  const rawRows = [];
   for (const thumb of thumbs) {
     try {
-      const text = await thumb.evaluate((el) => {
+      const data = await thumb.evaluate((el) => {
+        // 縮圖本身可能是 <img> 標籤，也可能是用 CSS 背景圖呈現的元素，兩種都要處理
+        const getImgUrl = (node) => {
+          if (node.tagName === "IMG" && node.src) return node.src;
+          const bg = node.style?.backgroundImage || getComputedStyle(node).backgroundImage;
+          const m = bg && bg.match(/url\(["']?(.*?)["']?\)/);
+          return m ? m[1] : null;
+        };
+        const imageUrl = getImgUrl(el) || (el.querySelector && getImgUrl(el.querySelector("img")) ) || null;
+
         let node = el;
-        // 從縮圖往上找幾層祖先，直到抓到的文字看起來像一整列（含日期或數字），
-        // 或是已經到頂為止
         for (let i = 0; i < 8 && node && node.parentElement; i++) {
           node = node.parentElement;
           const t = node.textContent.replace(/\s+/g, " ").trim();
-          if (t.length > 15) return t;
+          if (t.length > 15) return { text: t, imageUrl };
         }
-        return node ? node.textContent.replace(/\s+/g, " ").trim() : "";
+        return { text: node ? node.textContent.replace(/\s+/g, " ").trim() : "", imageUrl };
       });
-      if (text) rawRowTexts.push(text);
+      if (data.text) rawRows.push(data);
     } catch (e) {
       // 忽略單一列讀取失敗，不影響其他列
     }
   }
 
-  if (!rawRowTexts.length) {
+  if (!rawRows.length) {
     await debugCapture(page, `${ctx.cc}_${ctx.chartKey}${ctx.dateSuffix ? "_" + ctx.dateSuffix : ""}`);
     return [];
   }
 
-  return rawRowTexts.map((rawText, i) => {
-    const parsed = classifyRowText(rawText);
+  return rawRows.map(({ text, imageUrl }, i) => {
+    const parsed = classifyRowText(text);
     return {
       captured_date: ctx.today,
       market: ctx.cc,
@@ -128,6 +135,7 @@ async function scrapeChart(page, url, ctx) {
       chart: ctx.chartKey,
       period_suffix: ctx.dateSuffix || "",
       rank: i + 1,
+      image_url: imageUrl || "",
       ...parsed,
     };
   });
