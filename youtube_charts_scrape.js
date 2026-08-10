@@ -107,13 +107,37 @@ async function scrapeChart(page, url, ctx) {
         };
         const imageUrl = getImgUrl(el) || (el.querySelector && getImgUrl(el.querySelector("img")) ) || null;
 
+        // 收集一個節點底下「每個最底層文字元素」各自的文字，
+        // 保留標題／藝人名／日期／數字彼此原本的元素邊界，
+        // 不要黏成一整串再事後用數字/日期去猜分界點
+        function collectParts(node) {
+          const parts = [];
+          function walk(n) {
+            const children = n.children ? Array.from(n.children) : [];
+            if (!children.length) {
+              const t = (n.textContent || "").replace(/\s+/g, " ").trim();
+              if (t) parts.push(t);
+              return;
+            }
+            for (const c of children) walk(c);
+          }
+          walk(node);
+          return parts;
+        }
+
         let node = el;
         for (let i = 0; i < 8 && node && node.parentElement; i++) {
           node = node.parentElement;
           const t = node.textContent.replace(/\s+/g, " ").trim();
-          if (t.length > 15) return { text: t, imageUrl };
+          if (t.length > 15) {
+            return { text: t, parts: collectParts(node), imageUrl };
+          }
         }
-        return { text: node ? node.textContent.replace(/\s+/g, " ").trim() : "", imageUrl };
+        return {
+          text: node ? node.textContent.replace(/\s+/g, " ").trim() : "",
+          parts: node ? collectParts(node) : [],
+          imageUrl,
+        };
       });
       if (data.text) rawRows.push(data);
     } catch (e) {
@@ -126,8 +150,8 @@ async function scrapeChart(page, url, ctx) {
     return [];
   }
 
-  return rawRows.map(({ text, imageUrl }, i) => {
-    const parsed = classifyRowText(text);
+  return rawRows.map(({ text, parts, imageUrl }, i) => {
+    const parsed = classifyRowText(text, parts);
     return {
       captured_date: ctx.today,
       market: ctx.cc,
@@ -141,32 +165,46 @@ async function scrapeChart(page, url, ctx) {
   });
 }
 
-function classifyRowText(rawText) {
-  // 開頭常常夾帶名次數字／「New」標籤（跟縮圖同一列左側的排名徽章），
-  // 這些跟我們另外用陣列順序算好的 rank 欄位是重複資訊，先剝掉再判斷標題
-  let text = rawText.replace(/^\s*\d{1,3}\s*(New\s*)?/i, "").trim();
-
-  const dateMatch = text.match(DATE_PATTERN);
+function classifyRowText(rawText, parts = []) {
+  const dateMatch = rawText.match(DATE_PATTERN);
   const releaseDate = dateMatch ? dateMatch[0] : "";
 
-  let withoutDate = releaseDate ? text.replace(releaseDate, " | ") : text;
+  const isRankBadge = (s) => /^[-▲▼]?\s*\d{0,3}$/.test(s) || /^New$/i.test(s);
+  const isDateStr = (s) => DATE_PATTERN.test(s);
+  const isPureNumber = (s) => PURE_NUMBER_PATTERN.test(s.replace(/,/g, ""));
 
-  const numberMatches = withoutDate.match(/\d[\d,]{2,}/g) || [];
+  const numberMatches = rawText.match(/\d[\d,]{2,}/g) || [];
   const metricValue = numberMatches.length ? numberMatches[numberMatches.length - 1].replace(/,/g, "") : "";
 
-  let remainder = withoutDate;
-  for (const n of numberMatches) remainder = remainder.replace(n, " | ");
-  // 去掉名次升降的符號殘留（例如 "- 1"、"▲ 3" 這類名次變化標記）
-  remainder = remainder.replace(/[-▲▼]\s*\d*/g, " | ");
+  // 優先用「元素邊界」分出的 parts 判斷標題／藝人名，
+  // 這比用數字/日期的位置去猜邊界準確，因為多數列根本沒有數字或日期可以當分界點
+  const nameParts = parts.filter((p) => !isRankBadge(p) && !isDateStr(p) && !isPureNumber(p));
 
-  const parts = remainder
+  if (nameParts.length >= 2) {
+    return {
+      primary_name: nameParts[0],
+      secondary_name: nameParts.slice(1).join(" / "),
+      release_date: releaseDate,
+      metric_value: metricValue,
+      raw_text: rawText.slice(0, 300),
+    };
+  }
+
+  // parts 資訊不足時的備援邏輯（跟舊版行為相同，理論上不該常常用到）
+  let text = rawText.replace(/^\s*\d{1,3}\s*(New\s*)?/i, "").trim();
+  let withoutDate = releaseDate ? text.replace(releaseDate, " | ") : text;
+  const nm = withoutDate.match(/\d[\d,]{2,}/g) || [];
+  let remainder = withoutDate;
+  for (const n of nm) remainder = remainder.replace(n, " | ");
+  remainder = remainder.replace(/[-▲▼]\s*\d*/g, " | ");
+  const fallbackParts = remainder
     .split("|")
     .map((s) => s.trim())
     .filter((s) => s && !/^[\d\s.\-●]+$/.test(s));
 
   return {
-    primary_name: parts[0] || "",
-    secondary_name: parts.slice(1).join(" ") || "",
+    primary_name: fallbackParts[0] || "",
+    secondary_name: fallbackParts.slice(1).join(" ") || "",
     release_date: releaseDate,
     metric_value: metricValue,
     raw_text: rawText.slice(0, 300),
