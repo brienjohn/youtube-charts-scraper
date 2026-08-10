@@ -177,29 +177,39 @@ async function scrapeChart(page, url, ctx) {
 function classifyRowText(rawText, parts = []) {
   const dateMatch = rawText.match(DATE_PATTERN);
   const releaseDate = dateMatch ? dateMatch[0] : "";
+  // 算觀看數之前要先把日期字串本身拿掉，不然像「Jul 30, 2026」裡的「2026」
+  // 會被誤判成觀看數（因為它也是連續 3 位以上的數字）
+  const textForMetric = releaseDate ? rawText.replace(releaseDate, " ") : rawText;
 
   const isRankBadge = (s) => /^[-▲▼]?\s*\d{0,3}$/.test(s) || /^New$/i.test(s);
   const isDateStr = (s) => DATE_PATTERN.test(s);
   const isPureNumber = (s) => PURE_NUMBER_PATTERN.test(s.replace(/,/g, ""));
+  // YouTube 對觀看數很少的影片會顯示「<10K」這種縮寫格式，不是單純數字，
+  // 這種格式不該被當成標題或藝人名的一部分
+  const isLowCountMarker = (s) => /^<\s*\d+[KMB]?$/i.test(s);
   // 整個元素本身就是純符號（例如畫面上獨立的圓點小圖示「●」）→ 整段視為裝飾，丟棄
   const isSymbolOnly = (s) => !/[\p{L}\p{N}]/u.test(s);
   // 符號跟文字黏在同一個元素、中間用空白隔開（例如「● 阿爾卡·雅格尼克」）→ 只裁掉符號那個「詞」。
   // 注意：不能用「開頭/結尾任何非文字字元」這種寫法，否則會連歌名本身的括號、引號等標點
-  // 也一起裁掉（例如「甲乙丙丁 (你我怎么两清)」結尾緊貼的「)」就不該被裁掉，
-  // 因為它跟前一個字之間沒有空白，是內容本身的一部分，不是獨立圖示）
+  // 也一起裁掉（例如「甲乙丙丁 (你我怎么两清)」結尾緊貼的「)」就不該被裁掉）
   const stripSymbolTokens = (s) =>
     s
       .replace(/^[^\p{L}\p{N}\s]+(?=\s)/u, "")
       .replace(/(?<=\s)[^\p{L}\p{N}\s]+$/u, "")
       .trim();
 
-  const numberMatches = rawText.match(/\d[\d,]{2,}/g) || [];
-  const metricValue = numberMatches.length ? numberMatches[numberMatches.length - 1].replace(/,/g, "") : "";
+  const numberMatches = textForMetric.match(/\d[\d,]{2,}/g) || [];
+  const lowCountMatch = textForMetric.match(/<\s*\d+[KMB]?/i);
+  const metricValue = numberMatches.length
+    ? numberMatches[numberMatches.length - 1].replace(/,/g, "")
+    : lowCountMatch
+      ? lowCountMatch[0].replace(/\s+/g, "")
+      : "";
 
   // 優先用「元素邊界」分出的 parts 判斷標題／藝人名，
   // 這比用數字/日期的位置去猜邊界準確，因為多數列根本沒有數字或日期可以當分界點
   const nameParts = parts
-    .filter((p) => !isSymbolOnly(p))
+    .filter((p) => !isSymbolOnly(p) && !isLowCountMarker(p))
     .map(stripSymbolTokens)
     .filter((p) => p && !isRankBadge(p) && !isDateStr(p) && !isPureNumber(p));
 
@@ -340,7 +350,7 @@ async function main() {
 
   const browser = await chromium.launch();
   const context = await browser.newContext({
-    locale: "en-US",
+    locale: "zh-TW",
     viewport: { width: 1400, height: 1000 },
   });
   const page = await context.newPage();
