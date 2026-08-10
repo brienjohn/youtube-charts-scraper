@@ -8,6 +8,7 @@
     "backfill": "node youtube_charts_scrape.js --mode backfill --max-targets 10"
   },
   "dependencies": {
+    "opencc-js": "^1.4.1",
     "playwright": "^1.47.0"
   }
 }

@@ -6,6 +6,11 @@
 import { chromium } from "playwright";
 import fs from "fs";
 import path from "path";
+import * as OpenCC from "opencc-js";
+
+// 簡體轉台灣繁體：YouTube 頁面上偶爾會出現簡體字內容（例如陸區上傳的歌曲），
+// 但音樂產業日報的鐵律是「絕不出現簡體字」，所以歌名/藝人名一律先轉一輪繁體再寫入
+const s2tConverter = OpenCC.Converter({ from: "cn", to: "tw" });
 
 const MARKETS = {
   global: "Global",
@@ -36,7 +41,11 @@ const BACKFILLABLE_CHARTS = [
   { key: "top_artists_weekly", pathName: "TopArtists" },
 ];
 
-const DATE_PATTERN = /\d{1,2}\s*月\s*\d{1,2},?\s*\d{4}/;
+// 日期格式判斷：改成 en-US 語系後，頁面上的日期預期會變成「Dec 18, 2024」這種英文月份格式，
+// 但保留中文格式（「12月 18, 2024」）的比對，以防某些欄位語系沒有完全跟著切換
+const DATE_PATTERN_ZH = /\d{1,2}\s*月\s*\d{1,2},?\s*\d{4}/;
+const DATE_PATTERN_EN = /\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},?\s*\d{4}\b/i;
+const DATE_PATTERN = new RegExp(`(?:${DATE_PATTERN_ZH.source})|(?:${DATE_PATTERN_EN.source})`);
 const PURE_NUMBER_PATTERN = /^[\d,]{2,}$/;
 
 function taipeiDateString(offsetDays = 0) {
@@ -172,20 +181,24 @@ function classifyRowText(rawText, parts = []) {
   const isRankBadge = (s) => /^[-▲▼]?\s*\d{0,3}$/.test(s) || /^New$/i.test(s);
   const isDateStr = (s) => DATE_PATTERN.test(s);
   const isPureNumber = (s) => PURE_NUMBER_PATTERN.test(s.replace(/,/g, ""));
-  // 濾掉不含任何文字或數字的純符號元素（例如畫面上的圓點小圖示「●」）
-  const isSymbolOnly = (s) => !/[\p{L}\p{N}]/u.test(s);
+  // 有些畫面小圖示（例如「●」）會跟文字黏在同一個元素裡，而不是自己獨立一個元素，
+  // 所以除了濾掉純符號元素，也要把每個元素前後的符號裁掉，只留中間真正的文字
+  const stripEdgeSymbols = (s) =>
+    s.replace(/^[^\p{L}\p{N}]+/u, "").replace(/[^\p{L}\p{N}]+$/u, "").trim();
 
   const numberMatches = rawText.match(/\d[\d,]{2,}/g) || [];
   const metricValue = numberMatches.length ? numberMatches[numberMatches.length - 1].replace(/,/g, "") : "";
 
   // 優先用「元素邊界」分出的 parts 判斷標題／藝人名，
   // 這比用數字/日期的位置去猜邊界準確，因為多數列根本沒有數字或日期可以當分界點
-  const nameParts = parts.filter((p) => !isRankBadge(p) && !isDateStr(p) && !isPureNumber(p) && !isSymbolOnly(p));
+  const nameParts = parts
+    .map(stripEdgeSymbols)
+    .filter((p) => p && !isRankBadge(p) && !isDateStr(p) && !isPureNumber(p));
 
   if (nameParts.length >= 2) {
     return {
-      primary_name: nameParts[0],
-      secondary_name: nameParts.slice(1).join(" / "),
+      primary_name: s2tConverter(nameParts[0]),
+      secondary_name: s2tConverter(nameParts.slice(1).join(" / ")),
       release_date: releaseDate,
       metric_value: metricValue,
       raw_text: rawText.slice(0, 300),
@@ -205,8 +218,8 @@ function classifyRowText(rawText, parts = []) {
     .filter((s) => s && !/^[\d\s.\-●]+$/.test(s));
 
   return {
-    primary_name: fallbackParts[0] || "",
-    secondary_name: fallbackParts.slice(1).join(" ") || "",
+    primary_name: s2tConverter(fallbackParts[0] || ""),
+    secondary_name: s2tConverter(fallbackParts.slice(1).join(" ") || ""),
     release_date: releaseDate,
     metric_value: metricValue,
     raw_text: rawText.slice(0, 300),
@@ -319,7 +332,7 @@ async function main() {
 
   const browser = await chromium.launch();
   const context = await browser.newContext({
-    locale: "zh-TW",
+    locale: "en-US",
     viewport: { width: 1400, height: 1000 },
   });
   const page = await context.newPage();
