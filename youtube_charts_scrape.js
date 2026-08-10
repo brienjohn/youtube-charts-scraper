@@ -181,10 +181,17 @@ function classifyRowText(rawText, parts = []) {
   const isRankBadge = (s) => /^[-▲▼]?\s*\d{0,3}$/.test(s) || /^New$/i.test(s);
   const isDateStr = (s) => DATE_PATTERN.test(s);
   const isPureNumber = (s) => PURE_NUMBER_PATTERN.test(s.replace(/,/g, ""));
-  // 有些畫面小圖示（例如「●」）會跟文字黏在同一個元素裡，而不是自己獨立一個元素，
-  // 所以除了濾掉純符號元素，也要把每個元素前後的符號裁掉，只留中間真正的文字
-  const stripEdgeSymbols = (s) =>
-    s.replace(/^[^\p{L}\p{N}]+/u, "").replace(/[^\p{L}\p{N}]+$/u, "").trim();
+  // 整個元素本身就是純符號（例如畫面上獨立的圓點小圖示「●」）→ 整段視為裝飾，丟棄
+  const isSymbolOnly = (s) => !/[\p{L}\p{N}]/u.test(s);
+  // 符號跟文字黏在同一個元素、中間用空白隔開（例如「● 阿爾卡·雅格尼克」）→ 只裁掉符號那個「詞」。
+  // 注意：不能用「開頭/結尾任何非文字字元」這種寫法，否則會連歌名本身的括號、引號等標點
+  // 也一起裁掉（例如「甲乙丙丁 (你我怎么两清)」結尾緊貼的「)」就不該被裁掉，
+  // 因為它跟前一個字之間沒有空白，是內容本身的一部分，不是獨立圖示）
+  const stripSymbolTokens = (s) =>
+    s
+      .replace(/^[^\p{L}\p{N}\s]+(?=\s)/u, "")
+      .replace(/(?<=\s)[^\p{L}\p{N}\s]+$/u, "")
+      .trim();
 
   const numberMatches = rawText.match(/\d[\d,]{2,}/g) || [];
   const metricValue = numberMatches.length ? numberMatches[numberMatches.length - 1].replace(/,/g, "") : "";
@@ -192,7 +199,8 @@ function classifyRowText(rawText, parts = []) {
   // 優先用「元素邊界」分出的 parts 判斷標題／藝人名，
   // 這比用數字/日期的位置去猜邊界準確，因為多數列根本沒有數字或日期可以當分界點
   const nameParts = parts
-    .map(stripEdgeSymbols)
+    .filter((p) => !isSymbolOnly(p))
+    .map(stripSymbolTokens)
     .filter((p) => p && !isRankBadge(p) && !isDateStr(p) && !isPureNumber(p));
 
   if (nameParts.length >= 2) {
