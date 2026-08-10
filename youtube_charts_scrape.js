@@ -172,13 +172,15 @@ function classifyRowText(rawText, parts = []) {
   const isRankBadge = (s) => /^[-▲▼]?\s*\d{0,3}$/.test(s) || /^New$/i.test(s);
   const isDateStr = (s) => DATE_PATTERN.test(s);
   const isPureNumber = (s) => PURE_NUMBER_PATTERN.test(s.replace(/,/g, ""));
+  // 濾掉不含任何文字或數字的純符號元素（例如畫面上的圓點小圖示「●」）
+  const isSymbolOnly = (s) => !/[\p{L}\p{N}]/u.test(s);
 
   const numberMatches = rawText.match(/\d[\d,]{2,}/g) || [];
   const metricValue = numberMatches.length ? numberMatches[numberMatches.length - 1].replace(/,/g, "") : "";
 
   // 優先用「元素邊界」分出的 parts 判斷標題／藝人名，
   // 這比用數字/日期的位置去猜邊界準確，因為多數列根本沒有數字或日期可以當分界點
-  const nameParts = parts.filter((p) => !isRankBadge(p) && !isDateStr(p) && !isPureNumber(p));
+  const nameParts = parts.filter((p) => !isRankBadge(p) && !isDateStr(p) && !isPureNumber(p) && !isSymbolOnly(p));
 
   if (nameParts.length >= 2) {
     return {
