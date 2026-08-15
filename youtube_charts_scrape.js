@@ -35,11 +35,19 @@ const CURRENT_CHARTS = [
   { key: "top_shorts_songs_weekly", pathName: "TopShortsSongs", timeframe: "weekly" },
 ];
 
-// 可以回溯歷史的榜（週榜，網址帶 YYYYMMDD 往回跳 7 天）
+// 可以回溯歷史的榜：週榜網址帶 YYYYMMDD 往回跳 7 天，日榜往回跳 1 天
+// （TrendingVideos 是即時性質，無法回溯，不列在這裡）
 const BACKFILLABLE_CHARTS = [
-  { key: "top_songs_weekly", pathName: "TopSongs" },
-  { key: "top_artists_weekly", pathName: "TopArtists" },
+  { key: "top_songs_weekly", pathName: "TopSongs", timeframe: "weekly" },
+  { key: "top_artists_weekly", pathName: "TopArtists", timeframe: "weekly" },
+  { key: "top_videos_daily", pathName: "TopVideos", timeframe: "daily" },
+  { key: "top_videos_weekly", pathName: "TopVideos", timeframe: "weekly" },
+  { key: "top_shorts_songs_daily", pathName: "TopShortsSongs", timeframe: "daily" },
+  { key: "top_shorts_songs_weekly", pathName: "TopShortsSongs", timeframe: "weekly" },
 ];
+
+// 回溯要抓到多早：抓到這天（含）附近就停，不用每次手動調期數上限
+const BACKFILL_TARGET_DATE = "20260101";
 
 // 日期格式判斷：改成 en-US 語系後，頁面上的日期預期會變成「Dec 18, 2024」這種英文月份格式，
 // 但保留中文格式（「12月 18, 2024」）的比對，以防某些欄位語系沒有完全跟著切換
@@ -244,8 +252,8 @@ function classifyRowText(rawText, parts = []) {
   };
 }
 
-async function findLatestAnchorDate(page, pathName, cc) {
-  const url = buildUrl(pathName, cc, "weekly", null);
+async function findLatestAnchorDate(page, pathName, cc, timeframe) {
+  const url = buildUrl(pathName, cc, timeframe, null);
   await page.goto(url, { waitUntil: "networkidle", timeout: 45000 }).catch(() => null);
   await page.waitForTimeout(1500);
   const finalUrl = page.url();
@@ -298,17 +306,22 @@ async function runCurrent(page, outDir, limitMarkets) {
 
 async function runBackfill(page, outDir, maxTargets) {
   const targets = [];
+  // 安全上限：日榜約需 230 步、週榜約需 35 步就會先因為跳過 BACKFILL_TARGET_DATE 而停下，
+  // 這個數字只是防呆用，避免日期算錯時無限迴圈
+  const MAX_STEPS = 400;
 
   for (const spec of BACKFILLABLE_CHARTS) {
+    const stepDays = spec.timeframe === "daily" ? 1 : 7;
     for (const [cc, marketName] of Object.entries(MARKETS)) {
-      const anchor = await findLatestAnchorDate(page, spec.pathName, cc);
+      const anchor = await findLatestAnchorDate(page, spec.pathName, cc, spec.timeframe);
       if (!anchor) {
-        console.warn(`[warn] ${spec.key}/${cc} 找不到目前最新的週次錨點，略過`);
+        console.warn(`[warn] ${spec.key}/${cc} 找不到目前最新一期的錨點，略過`);
         continue;
       }
-      // 往回最多 15 週（跟畫面上下拉選單能選到的範圍差不多）
-      for (let w = 1; w <= 15; w++) {
-        const dateSuffix = addDaysToYyyymmdd(anchor, -7 * w);
+      // 從錨點往回跳，跳到早於 BACKFILL_TARGET_DATE 就停，不再用固定期數上限
+      for (let w = 1; w <= MAX_STEPS; w++) {
+        const dateSuffix = addDaysToYyyymmdd(anchor, -stepDays * w);
+        if (dateSuffix < BACKFILL_TARGET_DATE) break;
         const checkFile = path.join(outDir, `youtube_${spec.key}_${cc}_${dateSuffix}.csv`);
         if (fs.existsSync(checkFile)) continue;
         targets.push({ spec, cc, marketName, dateSuffix });
@@ -321,7 +334,7 @@ async function runBackfill(page, outDir, maxTargets) {
 
   const today = taipeiDateString(0);
   for (const { spec, cc, marketName, dateSuffix } of batch) {
-    const url = buildUrl(spec.pathName, cc, "weekly", dateSuffix);
+    const url = buildUrl(spec.pathName, cc, spec.timeframe, dateSuffix);
     console.log(`=== backfill ${spec.key} / ${cc} / ${dateSuffix} : ${url} ===`);
     try {
       const rows = await scrapeChart(page, url, {
@@ -346,7 +359,9 @@ async function main() {
     : "current";
   const outDir = "data";
   const maxTargetsArgIdx = process.argv.indexOf("--max-targets");
-  const maxTargets = maxTargetsArgIdx > -1 ? parseInt(process.argv[maxTargetsArgIdx + 1], 10) : 10;
+  // 加了 daily 榜之後回溯總量變大（6 種榜 x 10 市場 x 最多 230 天/33 週），
+  // 預設值調高，避免要手動重跑幾百次才抓得完
+  const maxTargets = maxTargetsArgIdx > -1 ? parseInt(process.argv[maxTargetsArgIdx + 1], 10) : 300;
 
   const browser = await chromium.launch();
   const context = await browser.newContext({
