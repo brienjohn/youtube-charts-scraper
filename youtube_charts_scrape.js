@@ -252,13 +252,47 @@ function classifyRowText(rawText, parts = []) {
   };
 }
 
+// 把日期選擇器按鈕上的文字轉成 YYYYMMDD（取「結束日」）：
+// 日榜是單一日期「8月 27, 2026」；週榜同月是「8月 14 – 20, 2026」；
+// 週榜跨月是「7月 31 – 8月 6, 2026」；跨年格式沒有實測過，抓不到就回傳 null，讓呼叫端略過這筆
+function parseDateLabelToYyyymmdd(text) {
+  if (!text) return null;
+  const t = text.trim();
+
+  // 跨月／跨年週榜：兩段「N月 D」各自出現，取後面那段的年月日
+  const crossMonth = t.match(/(\d{1,2})月\s*(\d{1,2}),?\s*(\d{4})?\s*[–-]\s*(\d{1,2})月\s*(\d{1,2}),?\s*(\d{4})/);
+  if (crossMonth) {
+    const [, , , , endMonth, endDay, endYear] = crossMonth;
+    return `${endYear}${endMonth.padStart(2, "0")}${endDay.padStart(2, "0")}`;
+  }
+
+  // 同月週榜：「8月 14 – 20, 2026」，月份只出現一次，年份/月份套用到後面那個日
+  const sameMonth = t.match(/(\d{1,2})月\s*\d{1,2}\s*[–-]\s*(\d{1,2}),?\s*(\d{4})/);
+  if (sameMonth) {
+    const [, month, endDay, year] = sameMonth;
+    return `${year}${month.padStart(2, "0")}${endDay.padStart(2, "0")}`;
+  }
+
+  // 日榜單一日期：「8月 27, 2026」
+  const single = t.match(/(\d{1,2})月\s*(\d{1,2}),?\s*(\d{4})/);
+  if (single) {
+    const [, month, day, year] = single;
+    return `${year}${month.padStart(2, "0")}${day.padStart(2, "0")}`;
+  }
+
+  return null;
+}
+
 async function findLatestAnchorDate(page, pathName, cc, timeframe) {
   const url = buildUrl(pathName, cc, timeframe, null);
-  await page.goto(url, { waitUntil: "networkidle", timeout: 45000 }).catch(() => null);
-  await page.waitForTimeout(1500);
-  const finalUrl = page.url();
-  const m = finalUrl.match(/(\d{8})$/);
-  return m ? m[1] : null;
+  await page.goto(url, { waitUntil: "domcontentloaded", timeout: 45000 }).catch(() => null);
+  // 讀畫面上的日期選擇器按鈕文字（不是網址，這個網站是 SPA，網址列本身不會帶日期）
+  const dateBtn = page.getByRole("button", { name: /月.*\d{4}/ });
+  const text = await dateBtn
+    .first()
+    .textContent({ timeout: 20000 })
+    .catch(() => null);
+  return parseDateLabelToYyyymmdd(text);
 }
 
 function addDaysToYyyymmdd(yyyymmdd, deltaDays) {
@@ -304,7 +338,28 @@ async function runCurrent(page, outDir, limitMarkets) {
   }
 }
 
+// 回溯下限記錄檔：{ "top_songs_weekly_tw": "20260423", ... }
+// 代表這個榜/這個市場，實測到這天（含）之前就沒有資料了，YouTube 那邊本來就沒有更早的期數，
+// 不是爬蟲的問題。記下來之後，同一組合就不用每次重跑都再浪費請求去試更早的日期。
+function floorFilePath(outDir) {
+  return path.join(outDir, "_backfill_floor.json");
+}
+
+function loadBackfillFloors(outDir) {
+  try {
+    return JSON.parse(fs.readFileSync(floorFilePath(outDir), "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+function saveBackfillFloors(outDir, floors) {
+  fs.mkdirSync(outDir, { recursive: true });
+  fs.writeFileSync(floorFilePath(outDir), JSON.stringify(floors, null, 2), "utf8");
+}
+
 async function runBackfill(page, outDir, maxTargets) {
+  const floors = loadBackfillFloors(outDir);
   const targets = [];
   // 安全上限：日榜約需 230 步、週榜約需 35 步就會先因為跳過 BACKFILL_TARGET_DATE 而停下，
   // 這個數字只是防呆用，避免日期算錯時無限迴圈
@@ -313,18 +368,22 @@ async function runBackfill(page, outDir, maxTargets) {
   for (const spec of BACKFILLABLE_CHARTS) {
     const stepDays = spec.timeframe === "daily" ? 1 : 7;
     for (const [cc, marketName] of Object.entries(MARKETS)) {
+      const floorKey = `${spec.key}_${cc}`;
+      const knownFloor = floors[floorKey]; // 之前跑過、已經確認「這天之前沒資料」的下限（如果有的話）
+
       const anchor = await findLatestAnchorDate(page, spec.pathName, cc, spec.timeframe);
       if (!anchor) {
         console.warn(`[warn] ${spec.key}/${cc} 找不到目前最新一期的錨點，略過`);
         continue;
       }
-      // 從錨點往回跳，跳到早於 BACKFILL_TARGET_DATE 就停，不再用固定期數上限
+      // 從錨點往回跳，跳到早於 BACKFILL_TARGET_DATE、或早於已知下限，就停
       for (let w = 1; w <= MAX_STEPS; w++) {
         const dateSuffix = addDaysToYyyymmdd(anchor, -stepDays * w);
         if (dateSuffix < BACKFILL_TARGET_DATE) break;
+        if (knownFloor && dateSuffix <= knownFloor) break;
         const checkFile = path.join(outDir, `youtube_${spec.key}_${cc}_${dateSuffix}.csv`);
         if (fs.existsSync(checkFile)) continue;
-        targets.push({ spec, cc, marketName, dateSuffix });
+        targets.push({ spec, cc, marketName, dateSuffix, floorKey });
       }
     }
   }
@@ -333,7 +392,12 @@ async function runBackfill(page, outDir, maxTargets) {
   console.log(`[backfill] 這次處理 ${batch.length} 組（還有 ${Math.max(0, targets.length - batch.length)} 組留到下次）`);
 
   const today = taipeiDateString(0);
-  for (const { spec, cc, marketName, dateSuffix } of batch) {
+  const hitFloorThisRun = new Set(); // 這次跑到才發現的下限，同一組合後面（更早的日期）不用再試
+  let floorsChanged = false;
+
+  for (const { spec, cc, marketName, dateSuffix, floorKey } of batch) {
+    if (hitFloorThisRun.has(floorKey)) continue; // 這組已經在這次跑的過程中確認過沒資料了
+
     const url = buildUrl(spec.pathName, cc, spec.timeframe, dateSuffix);
     console.log(`=== backfill ${spec.key} / ${cc} / ${dateSuffix} : ${url} ===`);
     try {
@@ -344,12 +408,26 @@ async function runBackfill(page, outDir, maxTargets) {
         chartKey: spec.key,
         dateSuffix,
       });
-      writeCsvWithBom(path.join(outDir, `youtube_${spec.key}_${cc}_${dateSuffix}.csv`), rows);
-      console.log(`  -> ${rows.length} 筆`);
+      if (rows.length === 0) {
+        // 這天真的沒資料（不是抓取失敗），代表往回已經到底了：記下下限，
+        // 這組合更早的日期不用再試，這次跑不試，之後跑也不用再試
+        console.warn(`[warn] ${spec.key}/${cc}/${dateSuffix} 抓到 0 筆，視為已到歷史資料下限，往回不再嘗試更早的日期`);
+        floors[floorKey] = dateSuffix;
+        floorsChanged = true;
+        hitFloorThisRun.add(floorKey);
+      } else {
+        writeCsvWithBom(path.join(outDir, `youtube_${spec.key}_${cc}_${dateSuffix}.csv`), rows);
+        console.log(`  -> ${rows.length} 筆`);
+      }
     } catch (e) {
       console.warn(`[warn] backfill ${spec.key}/${cc}/${dateSuffix} 失敗：${e.message}`);
     }
     await page.waitForTimeout(1200);
+  }
+
+  if (floorsChanged) {
+    saveBackfillFloors(outDir, floors);
+    console.log(`[backfill] 更新了歷史資料下限記錄：${JSON.stringify(floors)}`);
   }
 }
 
