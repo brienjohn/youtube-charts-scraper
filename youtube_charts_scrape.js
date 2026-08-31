@@ -389,7 +389,11 @@ async function runBackfill(page, outDir, maxTargets) {
   }
 
   const batch = targets.slice(0, maxTargets);
-  console.log(`[backfill] 這次處理 ${batch.length} 組（還有 ${Math.max(0, targets.length - batch.length)} 組留到下次）`);
+  const remaining = Math.max(0, targets.length - batch.length);
+  console.log(`[backfill] 這次處理 ${batch.length} 組（還有 ${remaining} 組留到下次）`);
+  if (remaining === 0 && batch.length === 0) {
+    console.log(`[backfill] ✅ 全部抓完了——目前設定範圍內（回溯到 ${BACKFILL_TARGET_DATE}，或各市場實際的歷史下限）已經沒有新的資料可以抓，之後不用再手動觸發`);
+  }
 
   const today = taipeiDateString(0);
   const hitFloorThisRun = new Set(); // 這次跑到才發現的下限，同一組合後面（更早的日期）不用再試
