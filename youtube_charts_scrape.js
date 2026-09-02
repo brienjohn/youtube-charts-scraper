@@ -167,19 +167,25 @@ async function scrapeChart(page, url, ctx) {
     return [];
   }
 
-  return rawRows.map(({ text, parts, imageUrl }, i) => {
-    const parsed = classifyRowText(text, parts);
-    return {
-      captured_date: ctx.today,
-      market: ctx.cc,
-      market_name: ctx.marketName,
-      chart: ctx.chartKey,
-      period_suffix: ctx.dateSuffix || "",
-      rank: i + 1,
-      image_url: imageUrl || "",
-      ...parsed,
-    };
-  });
+  // YouTube 頁面本身有時會對失效／下架的影片顯示「目前無資料」當佔位文字，
+  // 這不是我們解析壞掉，是網站上真的就長這樣——這種列本身沒有意義的資料可存，直接跳過
+  const PLACEHOLDER_TITLES = ["目前無資料"];
+
+  return rawRows
+    .map(({ text, parts, imageUrl }, i) => {
+      const parsed = classifyRowText(text, parts);
+      return {
+        captured_date: ctx.today,
+        market: ctx.cc,
+        market_name: ctx.marketName,
+        chart: ctx.chartKey,
+        period_suffix: ctx.dateSuffix || "",
+        rank: i + 1,
+        image_url: imageUrl || "",
+        ...parsed,
+      };
+    })
+    .filter((row) => !PLACEHOLDER_TITLES.includes(row.primary_name) && !PLACEHOLDER_TITLES.includes(row.secondary_name));
 }
 
 function classifyRowText(rawText, parts = []) {
@@ -189,7 +195,14 @@ function classifyRowText(rawText, parts = []) {
   // 會被誤判成觀看數（因為它也是連續 3 位以上的數字）
   const textForMetric = releaseDate ? rawText.replace(releaseDate, " ") : rawText;
 
-  const isRankBadge = (s) => /^[-▲▼]?\s*\d{0,3}$/.test(s) || /^New$/i.test(s);
+  // 排名徽章（畫面上顯示「這是第幾名」的那個數字/符號）：這些榜單最多也才 100-200 名左右，
+  // 超過這個範圍的數字不可能是真排名，很可能其實是歌名本身（例如歌名剛好叫「315」）
+  const isRankBadge = (s) => {
+    if (/^New$/i.test(s)) return true;
+    const m = s.match(/^[-▲▼]?\s*(\d{1,3})$/);
+    if (!m) return false;
+    return parseInt(m[1], 10) <= 200;
+  };
   const isDateStr = (s) => DATE_PATTERN.test(s);
   const isPureNumber = (s) => PURE_NUMBER_PATTERN.test(s.replace(/,/g, ""));
   // YouTube 對觀看數很少的影片會顯示「<10K」這種縮寫格式，不是單純數字，
@@ -391,7 +404,7 @@ async function runBackfill(page, outDir, maxTargets) {
   const batch = targets.slice(0, maxTargets);
   const remaining = Math.max(0, targets.length - batch.length);
   console.log(`[backfill] 這次處理 ${batch.length} 組（還有 ${remaining} 組留到下次）`);
-  if (remaining === 0 && batch.length === 0) {
+  if (remaining === 0) {
     console.log(`[backfill] ✅ 全部抓完了——目前設定範圍內（回溯到 ${BACKFILL_TARGET_DATE}，或各市場實際的歷史下限）已經沒有新的資料可以抓，之後不用再手動觸發`);
   }
 
