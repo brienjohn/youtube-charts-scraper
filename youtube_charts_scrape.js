@@ -96,7 +96,9 @@ function writeCsvWithBom(filePath, rows) {
 
 async function debugCapture(page, label) {
   fs.mkdirSync("debug", { recursive: true });
-  await page.screenshot({ path: `debug/${label}.png`, fullPage: true }).catch(() => null);
+  await page.screenshot({ path: `debug/${label}.png`, fullPage: true }).catch((e) => {
+    console.warn(`[warn] 除錯截圖存檔失敗（${label}）：${e.message}`);
+  });
 }
 
 async function scrapeChart(page, url, ctx) {
@@ -180,7 +182,7 @@ async function scrapeChart(page, url, ctx) {
   // 這不是我們解析壞掉，是網站上真的就長這樣——這種列本身沒有意義的資料可存，直接跳過
   const PLACEHOLDER_TITLES = ["目前無資料"];
 
-  return rawRows
+  const finalRows = rawRows
     .map(({ text, parts, imageUrl }, i) => {
       const parsed = classifyRowText(text, parts);
       return {
@@ -196,6 +198,17 @@ async function scrapeChart(page, url, ctx) {
       };
     })
     .filter((row) => !PLACEHOLDER_TITLES.includes(row.primary_name) && !PLACEHOLDER_TITLES.includes(row.secondary_name));
+
+  // 這條路徑之前完全沒有記錄：縮圖元素有找到、每一列文字也讀到了（rawRows 不是空的），
+  // 但最後全部被「目前無資料」這個過濾條件濾光光——這種情況會安靜地回傳 0 筆，
+  // 不會印任何警告，也不會留除錯截圖，之前發生問題完全看不出來，這裡補上
+  if (!finalRows.length) {
+    const label = `${ctx.cc}_${ctx.chartKey}${ctx.dateSuffix ? "_" + ctx.dateSuffix : ""}_filtered_empty`;
+    console.warn(`[warn] ${ctx.chartKey}/${ctx.cc}：抓到 ${rawRows.length} 列原始文字，但濾完剩 0 筆，存截圖 ${label}.png 供排查`);
+    await debugCapture(page, label);
+  }
+
+  return finalRows;
 }
 
 function classifyRowText(rawText, parts = []) {
