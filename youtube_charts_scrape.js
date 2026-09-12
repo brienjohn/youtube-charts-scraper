@@ -79,6 +79,15 @@ function toCsv(rows) {
   return [headers.join(","), ...rows.map((row) => headers.map((h) => escape(row[h])).join(","))].join("\n");
 }
 
+// YouTube Charts 頁面上的縮圖網址本身就帶著影片 ID（例如
+// https://i.ytimg.com/vi/j5Kk7dzUj6A/mqdefault.jpg 裡的 j5Kk7dzUj6A），
+// 不需要另外去找連結元素，直接從縮圖網址解析出來就能組出正確的觀看連結
+function videoUrlFromImageUrl(imageUrl) {
+  if (!imageUrl) return "";
+  const m = imageUrl.match(/\/vi\/([a-zA-Z0-9_-]{11})\//);
+  return m ? `https://www.youtube.com/watch?v=${m[1]}` : "";
+}
+
 function writeCsvWithBom(filePath, rows) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   if (!rows.length) return;
@@ -182,6 +191,7 @@ async function scrapeChart(page, url, ctx) {
         period_suffix: ctx.dateSuffix || "",
         rank: i + 1,
         image_url: imageUrl || "",
+        video_url: videoUrlFromImageUrl(imageUrl),
         ...parsed,
       };
     })
