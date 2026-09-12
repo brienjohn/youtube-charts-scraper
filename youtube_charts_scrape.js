@@ -352,12 +352,20 @@ async function runCurrent(page, outDir, limitMarkets) {
         allRows.push(...rows);
         console.log(`  -> ${rows.length} 筆`);
       } catch (e) {
+        // 之前這裡只印一行警告就跳過，整支腳本照樣正常結束、GitHub Actions 照樣顯示綠色，
+        // 完全看不出這個榜/這個市場其實抓失敗了——這次補上截圖，下次再發生才有畫面可以對照排查
         console.warn(`[warn] ${spec.key}/${cc} 失敗：${e.message}`);
+        await debugCapture(page, `${cc}_${spec.key}_exception`).catch(() => null);
       }
       await page.waitForTimeout(1200);
     }
     writeCsvWithBom(path.join(outDir, `youtube_${spec.key}_${today}.csv`), allRows);
     console.log(`[OK] ${spec.key}: 共 ${allRows.length} 筆`);
+    if (!allRows.length) {
+      // 這個榜當天在所有市場都是 0 筆，是很不尋常的狀況，用非致命的方式喊出來，
+      // 至少在 Actions 執行紀錄的 log 裡會看得到，不會完全被吞掉
+      console.error(`[ERROR] ${spec.key} 今天全部市場都是 0 筆，請檢查除錯截圖`);
+    }
   }
 }
 
