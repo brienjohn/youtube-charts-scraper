@@ -348,37 +348,49 @@ async function runCurrent(page, outDir, limitMarkets) {
   const marketEntries = limitMarkets ? Object.entries(MARKETS).slice(0, limitMarkets) : Object.entries(MARKETS);
 
   for (const spec of CURRENT_CHARTS) {
-    const allRows = [];
-    for (const [cc, marketName] of marketEntries) {
-      // 「發燒影片」沒有 Global 這個範圍，只有各國自己的版本，跳過避免無謂的失敗紀錄
-      if (spec.key === "trending_videos" && cc === "global") continue;
-      const url = buildUrl(spec.pathName, cc, spec.timeframe, null);
-      console.log(`=== ${spec.key} / ${cc} : ${url} ===`, );
-      try {
-        const rows = await scrapeChart(page, url, {
-          today,
-          cc,
-          marketName,
-          chartKey: spec.key,
-          dateSuffix: null,
-        });
-        allRows.push(...rows);
-        console.log(`  -> ${rows.length} 筆`);
-      } catch (e) {
-        // 之前這裡只印一行警告就跳過，整支腳本照樣正常結束、GitHub Actions 照樣顯示綠色，
-        // 完全看不出這個榜/這個市場其實抓失敗了——這次補上截圖，下次再發生才有畫面可以對照排查
-        console.warn(`[warn] ${spec.key}/${cc} 失敗：${e.message}`);
-        await debugCapture(page, `${cc}_${spec.key}_exception`).catch(() => null);
+    // 不管這個榜最後成功還是失敗，開始跟結束都無條件印一行——
+    // 之前的記錄方式全部都掛在「有例外發生」這個前提下，如果問題出在這個迴圈本身
+    // 中途被打斷、或迴圈根本沒跑到這裡，那些記錄一行都不會出現，等於完全看不到痕跡
+    console.log(`\n########## [開始] ${spec.key} ##########`);
+    try {
+      const allRows = [];
+      for (const [cc, marketName] of marketEntries) {
+        // 「發燒影片」沒有 Global 這個範圍，只有各國自己的版本，跳過避免無謂的失敗紀錄
+        if (spec.key === "trending_videos" && cc === "global") continue;
+        const url = buildUrl(spec.pathName, cc, spec.timeframe, null);
+        console.log(`=== ${spec.key} / ${cc} : ${url} ===`, );
+        try {
+          const rows = await scrapeChart(page, url, {
+            today,
+            cc,
+            marketName,
+            chartKey: spec.key,
+            dateSuffix: null,
+          });
+          allRows.push(...rows);
+          console.log(`  -> ${rows.length} 筆`);
+        } catch (e) {
+          // 之前這裡只印一行警告就跳過，整支腳本照樣正常結束、GitHub Actions 照樣顯示綠色，
+          // 完全看不出這個榜/這個市場其實抓失敗了——這次補上截圖，下次再發生才有畫面可以對照排查
+          console.warn(`[warn] ${spec.key}/${cc} 失敗：${e.message}`);
+          await debugCapture(page, `${cc}_${spec.key}_exception`).catch(() => null);
+        }
+        await page.waitForTimeout(1200);
       }
-      await page.waitForTimeout(1200);
+      writeCsvWithBom(path.join(outDir, `youtube_${spec.key}_${today}.csv`), allRows);
+      console.log(`[OK] ${spec.key}: 共 ${allRows.length} 筆`);
+      if (!allRows.length) {
+        // 這個榜當天在所有市場都是 0 筆，是很不尋常的狀況，用非致命的方式喊出來，
+        // 至少在 Actions 執行紀錄的 log 裡會看得到，不會完全被吞掉
+        console.error(`[ERROR] ${spec.key} 今天全部市場都是 0 筆，請檢查除錯截圖`);
+      }
+    } catch (e) {
+      // 這一層是新加的：涵蓋整個榜的處理過程，包含上面 try/catch 完全沒包到的部分
+      // （例如寫檔案、市場之間的等待）。之前這些地方一旦出錯會直接把整支程式炸掉，
+      // 後面排在更後面的榜單就連嘗試的機會都沒有，卻又不會留下任何看得到的紀錄
+      console.error(`[FATAL] ${spec.key} 這一整個榜的處理過程中途出了問題，跳過、繼續下一個榜：${e && e.stack || e}`);
     }
-    writeCsvWithBom(path.join(outDir, `youtube_${spec.key}_${today}.csv`), allRows);
-    console.log(`[OK] ${spec.key}: 共 ${allRows.length} 筆`);
-    if (!allRows.length) {
-      // 這個榜當天在所有市場都是 0 筆，是很不尋常的狀況，用非致命的方式喊出來，
-      // 至少在 Actions 執行紀錄的 log 裡會看得到，不會完全被吞掉
-      console.error(`[ERROR] ${spec.key} 今天全部市場都是 0 筆，請檢查除錯截圖`);
-    }
+    console.log(`########## [結束] ${spec.key} ##########\n`);
   }
 }
 
